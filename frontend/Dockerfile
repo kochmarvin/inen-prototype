@@ -4,7 +4,8 @@ WORKDIR /app
 
 # Backend URL is baked into the bundle at build time. Override with
 # `--build-arg VITE_BACKEND_URL=...` or in docker-compose.yml.
-ARG VITE_BACKEND_URL=http://localhost:3000
+# Empty = same-origin API (ALB path routing). docker-compose passes localhost for local dev.
+ARG VITE_BACKEND_URL=
 ENV VITE_BACKEND_URL=$VITE_BACKEND_URL
 
 COPY package.json package-lock.json ./

@@ -14,11 +14,17 @@ const LAMPS: Lamp[] = [
 
 interface Props {
   active: TrafficLightValue | null;
+  /** No new frame for a while — keep showing active lamp, slightly dimmed. */
+  stale?: boolean;
 }
 
-export function TrafficLight({ active }: Props) {
+export function TrafficLight({ active, stale = false }: Props) {
   return (
-    <div className="traffic-light" role="img" aria-label={`Stimmung: ${active ?? "unbekannt"}`}>
+    <div
+      className={`traffic-light${stale ? " traffic-light--stale" : ""}`}
+      role="img"
+      aria-label={`Stimmung: ${active ?? "unbekannt"}${stale ? " (veraltet)" : ""}`}
+    >
       <div className="traffic-light__pole">
         {LAMPS.map((lamp) => {
           const isActive = lamp.id === active;

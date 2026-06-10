@@ -9,14 +9,17 @@ start/stop the capture loop.
 from __future__ import annotations
 
 import io
+import os
 import queue
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Optional
 
 try:
     import tkinter as tk
+    from tkinter import scrolledtext
     from tkinter import ttk
 except ModuleNotFoundError as exc:
     # Homebrew's python@3.x is often built without Tcl/Tk; _tkinter is missing.
@@ -44,7 +47,30 @@ JPEG_QUALITY = 70
 # YOLO was trained on 640x640 inputs – downscaling here saves bandwidth and
 # inference time without hurting accuracy in this scenario.
 MAX_DIMENSION = 960
-REQUEST_TIMEOUT_S = 8.0
+# Local docker-compose: fast round-trip. AWS (CloudFront → Lambda → ML): cold start
+# can take 10–30 s; API Gateway caps at 29 s.
+DEFAULT_REQUEST_TIMEOUT_S = 8.0
+AWS_REQUEST_TIMEOUT_S = 30.0
+DEBUG_LOG = os.environ.get("DESKTOP_DEBUG", "1").strip().lower() not in ("0", "false", "no")
+MAX_LOG_LINES = 200
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def console_log(message: str) -> None:
+    if DEBUG_LOG:
+        print(f"[{_ts()}] {message}", flush=True)
+
+
+def request_timeout_s(backend_url: str) -> float:
+    raw = os.environ.get("REQUEST_TIMEOUT_S")
+    if raw is not None and raw.strip() != "":
+        return max(1.0, float(raw))
+    if backend_url.strip().lower().startswith("https://"):
+        return AWS_REQUEST_TIMEOUT_S
+    return DEFAULT_REQUEST_TIMEOUT_S
 
 
 def capture_jpeg(sct: mss.base.MSSBase) -> bytes:
@@ -76,6 +102,7 @@ class CaptureWorker(threading.Thread):
     ) -> None:
         super().__init__(daemon=True)
         self.backend_url = backend_url.rstrip("/")
+        self.request_timeout_s = request_timeout_s(self.backend_url)
         self.interval_s = max(0.1, interval_s)
         self.status_queue = status_queue
         self.stop_event = stop_event
@@ -87,24 +114,83 @@ class CaptureWorker(threading.Thread):
                     cycle_start = time.monotonic()
                     try:
                         jpeg = capture_jpeg(sct)
+                        self._emit(
+                            {
+                                "kind": "log",
+                                "message": f"captured JPEG ({len(jpeg) // 1024} kB)",
+                            }
+                        )
                     except Exception as exc:
+                        self._emit({"kind": "log", "message": f"capture failed: {exc}"})
                         self._emit({"kind": "error", "message": f"capture failed: {exc}"})
                         if self.stop_event.wait(self.interval_s):
                             break
                         continue
 
+                    post_url = f"{self.backend_url}/frame"
+                    upload_started = time.monotonic()
+                    self._emit(
+                        {
+                            "kind": "log",
+                            "message": (
+                                f"POST {post_url} "
+                                f"({len(jpeg) // 1024} kB, timeout={self.request_timeout_s:.0f}s)"
+                            ),
+                        }
+                    )
+                    response = None
                     try:
                         response = session.post(
-                            f"{self.backend_url}/frame",
+                            post_url,
                             files={"image": ("frame.jpg", jpeg, "image/jpeg")},
-                            timeout=REQUEST_TIMEOUT_S,
+                            timeout=self.request_timeout_s,
+                        )
+                        elapsed_ms = int((time.monotonic() - upload_started) * 1000)
+                        self._emit(
+                            {
+                                "kind": "log",
+                                "message": f"response HTTP {response.status_code} in {elapsed_ms} ms",
+                            }
                         )
                         response.raise_for_status()
                         payload = response.json()
-                        self._emit({"kind": "ok", "payload": payload, "bytes": len(jpeg)})
+                        emotion = payload.get("emotion") or "no face"
+                        self._emit(
+                            {
+                                "kind": "log",
+                                "message": f"parsed JSON: emotion={emotion}, face_found={payload.get('face_found')}",
+                            }
+                        )
+                        self._emit(
+                            {
+                                "kind": "ok",
+                                "payload": payload,
+                                "bytes": len(jpeg),
+                                "elapsed_ms": elapsed_ms,
+                            }
+                        )
+                    except requests.HTTPError as exc:
+                        detail = ""
+                        if exc.response is not None:
+                            detail = (exc.response.text or "")[:300].replace("\n", " ")
+                        self._emit(
+                            {
+                                "kind": "log",
+                                "message": f"HTTP error: {exc} body={detail!r}",
+                            }
+                        )
+                        self._emit({"kind": "error", "message": f"upload failed: {exc}"})
                     except requests.RequestException as exc:
+                        self._emit({"kind": "log", "message": f"request failed: {exc}"})
                         self._emit({"kind": "error", "message": f"upload failed: {exc}"})
                     except ValueError as exc:
+                        body = (response.text or "")[:200] if response is not None else ""
+                        self._emit(
+                            {
+                                "kind": "log",
+                                "message": f"invalid JSON body: {body!r} ({exc})",
+                            }
+                        )
                         self._emit({"kind": "error", "message": f"bad response: {exc}"})
 
                     elapsed = time.monotonic() - cycle_start
@@ -125,8 +211,8 @@ class DesktopApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Emotion Capture Client")
-        self.root.geometry("480x320")
-        self.root.resizable(False, False)
+        self.root.geometry("520x520")
+        self.root.minsize(480, 420)
 
         self.backend_var = tk.StringVar(value=DEFAULT_BACKEND_URL)
         self.interval_var = tk.DoubleVar(value=DEFAULT_INTERVAL_S)
@@ -189,7 +275,32 @@ class DesktopApp:
             row=6, column=1, columnspan=2, sticky="w", **pad
         )
 
+        ttk.Label(self.root, text="Debug log").grid(row=7, column=0, sticky="nw", **pad)
+        self.log_text = scrolledtext.ScrolledText(
+            self.root,
+            height=10,
+            width=58,
+            font=("Menlo", 10),
+            state="disabled",
+            wrap="word",
+        )
+        self.log_text.grid(row=7, column=1, columnspan=2, sticky="nsew", padx=12, pady=6)
+        self._log_line("ready — set Backend URL and press Start")
+
         self.root.columnconfigure(1, weight=1)
+        self.root.rowconfigure(7, weight=1)
+
+    def _log_line(self, message: str) -> None:
+        line = f"[{_ts()}] {message}\n"
+        console_log(message)
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line)
+        # Trim old lines
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > MAX_LOG_LINES:
+            self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
 
     def _start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -205,6 +316,8 @@ class DesktopApp:
             status_queue=self.status_queue,
             stop_event=self.stop_event,
         )
+        timeout = request_timeout_s(backend_url)
+        self._log_line(f"starting → {backend_url.rstrip('/')}/frame (timeout {timeout:.0f}s)")
         self.worker.start()
         self.status_var.set("running")
         self.start_btn.configure(state="disabled")
@@ -232,7 +345,9 @@ class DesktopApp:
 
     def _handle_event(self, event: dict) -> None:
         kind = event.get("kind")
-        if kind == "ok":
+        if kind == "log":
+            self._log_line(str(event.get("message", "")))
+        elif kind == "ok":
             payload = event.get("payload") or {}
             self.frame_count += 1
             self.counter_var.set(f"{self.frame_count} frames sent ({event.get('bytes', 0) // 1024} kB last)")
@@ -240,11 +355,18 @@ class DesktopApp:
             confidence = payload.get("confidence") or 0.0
             light = payload.get("smoothedLight") or payload.get("light") or "-"
             self.last_var.set(f"{emotion} ({confidence:.0%}) -> {light}")
-            self.status_var.set("running")
+            elapsed = event.get("elapsed_ms")
+            if elapsed is not None:
+                self.status_var.set(f"running (last upload {elapsed} ms)")
+            else:
+                self.status_var.set("running")
         elif kind == "error":
-            self.status_var.set(f"error: {event.get('message', 'unknown')}")
+            msg = event.get("message", "unknown")
+            self.status_var.set(f"error: {msg}")
+            self._log_line(f"ERROR: {msg}")
         elif kind == "stopped":
             self.status_var.set("idle")
+            self._log_line("stopped")
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
 

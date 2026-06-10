@@ -1,0 +1,7 @@
+project_name = "ineni-emotion"
+aws_region   = "eu-central-1"
+image_tag    = "latest"
+
+# Keeps one warm App-Lambda for stable /api/status (in-memory state).
+# Set to 1 only if your account has enough Lambda concurrency quota.
+# app_provisioned_concurrency = 0

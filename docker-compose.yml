@@ -54,6 +54,7 @@ services:
         # Wert wird in den Vite-Bundle gebaut. Der Browser läuft auf dem
         # Host, daher zeigt die URL auf localhost:3000 (Host-Port des
         # backend-Containers).
+        # Browser calls /api/* on the backend (see backend/src/app.js).
         VITE_BACKEND_URL: "http://localhost:3000"
     container_name: emotion-frontend
     restart: unless-stopped

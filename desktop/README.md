@@ -28,6 +28,14 @@ The UI lets you:
 Frames are resized so the longest edge is 960 px and JPEG-encoded at
 quality 70 to keep the upload light.
 
+For AWS (`https://…` backend URL), upload timeout defaults to **30 s** (ML
+Lambda cold start). Override with `REQUEST_TIMEOUT_S=15 python main.py`.
+Local `http://localhost:3000` stays at **8 s**.
+
+A **Debug log** panel in the window (and the same lines in the terminal) shows
+capture size, POST URL, HTTP status, latency, and errors. Disable terminal
+duplication with `DESKTOP_DEBUG=0 python main.py`.
+
 ## macOS notes
 
 ### `ModuleNotFoundError: No module named '_tkinter'`

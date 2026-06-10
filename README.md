@@ -12,7 +12,7 @@ startbaren Komponenten, die per HTTP kommunizieren.
         v
 [Backend: Node.js + Express]  ---- POST /predict (JPEG) ---->  [ML Service: Python/FastAPI + YOLO]
         ^                                                            (best.pt)
-        | GET /status (poll 500 ms)
+        | GET /status (poll 1.5 s)
         |
 [Frontend: React/Vite – Ampel mit Smileys]
 ```
@@ -22,7 +22,7 @@ startbaren Komponenten, die per HTTP kommunizieren.
 | [`ml-service/`](ml-service/) | YOLO-Inferenz (FastAPI), lädt `best.pt`                 | 8001 |
 | [`backend/`](backend/)       | Express-Proxy, Emotion→Ampel-Mapping, In-Memory-Status | 3000 |
 | [`desktop/`](desktop/)       | Screen Capture, sendet Frames an das Backend            | –    |
-| [`frontend/`](frontend/)     | React-Ampel, pollt `/status` alle 500 ms                | 5173 |
+| [`frontend/`](frontend/)     | React-Ampel, pollt `/status` alle 1,5 s                 | 5173 |
 
 Das trainierte Modell liegt in
 [`Facial Emotion Detection/best.pt`](Facial%20Emotion%20Detection/best.pt)
@@ -125,6 +125,7 @@ variable umlenken (Ports anders belegt, Hosts gewechselt usw.):
 | backend      | `ML_TIMEOUT_MS`    | `10000`                   |
 | frontend     | `VITE_BACKEND_URL` | `http://localhost:3000`   |
 | desktop (UI) | Backend-URL Feld   | `http://localhost:3000`   |
+| desktop      | `REQUEST_TIMEOUT_S`| `8` lokal, `30` bei `https://` |
 
 ## Troubleshooting
 
@@ -139,12 +140,55 @@ variable umlenken (Ports anders belegt, Hosts gewechselt usw.):
 - **Hohe CPU-Last im ML-Service** – Intervall in der Desktop-App auf
   z. B. 2 s hochsetzen oder `MIN_CONFIDENCE` anheben.
 
+## AWS Deployment (Terraform)
+
+Die Cloud-Variante aus dem Position Paper ist unter [`terraform/`](terraform/)
+umgesetzt: S3 + CloudFront (Frontend), API Gateway, zwei Lambda-Container
+(App-Backend + Emotions-ML).
+
+Kurzablauf:
+
+```bash
+cp "Facial Emotion Detection/best.pt" ml-service/best.pt
+cd terraform && cp terraform.tfvars.example terraform.tfvars && terraform init
+terraform apply -target=module.ecr -target=module.iam
+./scripts/build-and-push.sh
+terraform apply
+./scripts/upload-frontend.sh
+```
+
+Details, Warm-up-Hinweis und Desktop-URL: [`terraform/README.md`](terraform/README.md).
+
+- **Browser:** `terraform output cloudfront_url`
+- **Desktop-App:** Backend-URL = `terraform output desktop_backend_url` (endet auf `/api`)
+- **GitHub:** optional; lokales Deploy reicht. Keine AWS-Keys ins Repo.
+
+### Nur Frontend neu deployen (nach UI-Änderungen)
+
+Kein `terraform apply` nötig — nur bauen und nach S3 hochladen:
+
+```bash
+cd terraform
+eval "$(aws configure export-credentials --profile default --format env)"   # falls aws login
+./scripts/upload-frontend.sh
+```
+
+Danach Browser hard-refreshen (oder 1–2 Min. warten bis CloudFront-Invalidation durch ist).
+
 ## Hinweis zum Position Paper
 
-Das Paper beschreibt die serverseitige Verarbeitung als AWS-basierte Cloud-
-Architektur (API Gateway, Lambda, Datenbank). Dieser Prototyp implementiert
-denselben Datenfluss lokal: Desktop-App → HTTP-API (Express) → Inferenz
-(FastAPI/YOLO) → Webanwendung. Für die spätere Cloud-Variante können
-Backend und ML-Service in Container überführt und das `axios`-Forwarding
-auf eine AWS-Endpoint-URL gezeigt werden, ohne dass Desktop oder Frontend
-geändert werden müssen.
+Lokal und in AWS bleibt der Datenfluss gleich: Desktop-App → HTTP-API
+(Express unter `/api`) → Inferenz (FastAPI/YOLO) → Webanwendung (`/api/status`).
+In AWS ist keine persistente Datenbank vorgesehen; der Ampel-Status lebt
+kurzzeitig im Speicher der App-Lambda (Provisioned Concurrency = 1).
+
+
+cp "Facial Emotion Detection/best.pt" ml-service/best.pt
+cd terraform && cp terraform.tfvars.example terraform.tfvars && terraform init
+terraform apply -target=module.ecr -target=module.iam
+./scripts/build-and-push.sh
+terraform apply
+./scripts/upload-frontend.sh
+
+
+https://d3tmzx4qjqwpes.cloudfront.net/api

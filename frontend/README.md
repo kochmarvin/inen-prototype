@@ -1,7 +1,7 @@
 # Frontend – Traffic-Light React App
 
 Vite + React + TypeScript app that polls the backend's `/status` endpoint
-every 500 ms and shows the current mood as a three-step traffic light
+every 1.5 s and shows the current mood as a three-step traffic light
 (positive / neutral / negative).
 
 ## Setup

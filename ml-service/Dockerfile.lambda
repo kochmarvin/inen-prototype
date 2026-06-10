@@ -1,0 +1,20 @@
+FROM public.ecr.aws/lambda/python:3.10
+
+RUN yum install -y mesa-libGL glib2 \
+    && yum clean all
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py lambda_handler.py ./
+COPY best.pt ./
+
+ENV MODEL_PATH=/var/task/best.pt
+
+CMD ["lambda_handler.handler"]
